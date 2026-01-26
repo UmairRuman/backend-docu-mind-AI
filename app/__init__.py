@@ -1,0 +1,5 @@
+# app/__init__.py
+"""
+DocuMind AI - Production-grade RAG System
+"""
+__version__ = "1.0.0"
