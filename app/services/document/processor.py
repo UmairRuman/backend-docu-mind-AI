@@ -6,7 +6,7 @@ from datetime import datetime
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.schema import Document
+from langchain_core.documents  import Document
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -168,13 +168,19 @@ class DocumentProcessor:
         Checks:
         - File extension is allowed
         - File size is within limit
+
+        Returns:
+        True if valid
+        
+        Raises:
+        ValueError: If validation fails
         """
         # Check extension
         file_extension = Path(filename).suffix.lower().replace(".", "")
-        if file_extension not in settings.ALLOWED_EXTENSIONS:
+        if file_extension not in settings.allowed_extensions_list:
             raise ValueError(
                 f"File type .{file_extension} not allowed. "
-                f"Allowed types: {', '.join(settings.ALLOWED_EXTENSIONS)}"
+                f"Allowed types: {', '.join(settings.allowed_extensions_list)}"
             )
         
         # Check size

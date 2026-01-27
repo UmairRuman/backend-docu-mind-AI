@@ -1,6 +1,6 @@
 # app/services/rag/retriever.py
 from typing import List, Optional, Dict, Any
-from langchain.schema import Document
+from langchain_core.documents  import Document
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone
 
@@ -85,7 +85,7 @@ class VectorStoreService:
     def similarity_search(
         self, 
         query: str, 
-        k: int = None,
+        k: int = 3,
         filter: Optional[Dict[str, Any]] = None
     ) -> List[Document]:
         """
@@ -121,7 +121,7 @@ class VectorStoreService:
     def similarity_search_with_score(
         self, 
         query: str, 
-        k: int = None,
+        k: int = 3,
         filter: Optional[Dict[str, Any]] = None
     ) -> List[tuple[Document, float]]:
         """

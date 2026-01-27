@@ -2,9 +2,9 @@
 from typing import List, Dict, Any, Optional, AsyncIterator
 import asyncio
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains import ConversationalRetrievalChain
-from langchain.prompts import PromptTemplate
-from langchain.schema import Document
+
+from langchain_core.prompts import PromptTemplate
+from langchain_core.documents  import Document
 
 from app.core.config import settings
 from app.core.logging import get_logger

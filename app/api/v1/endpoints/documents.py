@@ -31,6 +31,13 @@ async def upload_document(file: UploadFile = File(...)):
     4. Add to vector store
     5. Clean up temporary file
     """
+    # Check if filename exists
+    if not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No filename provided"
+        )
+    
     logger.info(f"Received upload request for file: {file.filename}")
     
     try:
@@ -38,7 +45,7 @@ async def upload_document(file: UploadFile = File(...)):
         file_path = await save_upload_file(file)
         file_size = get_file_size(file_path)
         
-        # Step 2: Validate
+        # Step 2: Validate (now filename is guaranteed to be str)
         doc_processor.validate_file(file.filename, file_size)
         
         # Step 3: Process document

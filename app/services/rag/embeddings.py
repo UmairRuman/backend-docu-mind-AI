@@ -4,10 +4,11 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from dotenv import load_dotenv
 
 logger = get_logger(__name__)
 
-
+load_dotenv()  # Ensure environment variables are loaded
 class EmbeddingService:
     """
     Service for generating embeddings using Google's Generative AI.
@@ -19,8 +20,7 @@ class EmbeddingService:
         # Configure embeddings with 768 dimensions
         self.embeddings = GoogleGenerativeAIEmbeddings(
             model=settings.EMBEDDING_MODEL,
-            google_api_key=settings.GOOGLE_API_KEY,
-            task_type="retrieval_document"  # Optimized for RAG
+        
         )
         
         # Note: Google's embedding model will automatically use 768 dimensions
