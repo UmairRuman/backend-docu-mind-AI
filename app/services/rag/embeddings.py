@@ -1,31 +1,37 @@
 # app/services/rag/embeddings.py
 from typing import List
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from pydantic import SecretStr
+import google.generativeai as genai
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from dotenv import load_dotenv
 
 logger = get_logger(__name__)
 
-load_dotenv()  # Ensure environment variables are loaded
+
 class EmbeddingService:
     """
     Service for generating embeddings using Google's Generative AI.
+    Uses the latest text-embedding-004 model (free tier).
     """
     
     def __init__(self):
         logger.info(f"Initializing Google Embeddings with model: {settings.EMBEDDING_MODEL}")
         
-        # Configure embeddings with 768 dimensions
+        # Configure Google API
+        # genai.configure(api_key=settings.GOOGLE_API_KEY)
+        
+        # Initialize embeddings with the latest model
+        # FIX: Convert string to SecretStr
         self.embeddings = GoogleGenerativeAIEmbeddings(
             model=settings.EMBEDDING_MODEL,
-        
+            api_key=SecretStr(settings.GOOGLE_API_KEY),  # Convert to SecretStr
+            task_type="retrieval_document"
         )
         
-        # Note: Google's embedding model will automatically use 768 dimensions
-        # when we configure Pinecone with 768 dimensions
         logger.info(f"Embeddings configured for {settings.PINECONE_DIMENSION} dimensions")
+        logger.info("Using Google's latest text-embedding-004 model (Free Tier)")
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
@@ -35,7 +41,7 @@ class EmbeddingService:
             texts: List of text strings to embed
             
         Returns:
-            List of embedding vectors
+            List of embedding vectors (768-dimensional)
         """
         try:
             logger.info(f"Generating embeddings for {len(texts)} documents")
@@ -54,7 +60,7 @@ class EmbeddingService:
             text: Query text to embed
             
         Returns:
-            Embedding vector
+            Embedding vector (768-dimensional)
         """
         try:
             logger.info(f"Generating embedding for query: {text[:50]}...")

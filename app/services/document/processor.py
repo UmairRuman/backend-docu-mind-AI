@@ -177,10 +177,11 @@ class DocumentProcessor:
         """
         # Check extension
         file_extension = Path(filename).suffix.lower().replace(".", "")
-        if file_extension not in settings.allowed_extensions_list:
+        allowed = settings.allowed_extensions_list
+        if file_extension not in allowed:
             raise ValueError(
                 f"File type .{file_extension} not allowed. "
-                f"Allowed types: {', '.join(settings.allowed_extensions_list)}"
+                f"Allowed types: {', '.join(allowed)}"
             )
         
         # Check size
