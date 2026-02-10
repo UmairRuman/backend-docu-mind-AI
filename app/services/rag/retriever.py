@@ -29,10 +29,11 @@ class VectorStoreService:
         # Create index if it doesn't exist
         self._ensure_index_exists()
         
-        # Initialize vector store with Google embeddings
+        # Initialize vector store with explicit API key
         self.vector_store = PineconeVectorStore(
             index_name=self.index_name,
-            embedding=self.embedding_service.embeddings
+            embedding=self.embedding_service.embeddings,
+            pinecone_api_key=settings.PINECONE_API_KEY  # ADD THIS LINE
         )
         
         logger.info(f"Vector store initialized with index: {self.index_name}")
@@ -44,7 +45,6 @@ class VectorStoreService:
         if self.index_name not in existing_indexes:
             logger.info(f"Creating new Pinecone index: {self.index_name}")
             
-            # Pinecone v8 API
             self.pc.create_index(
                 name=self.index_name,
                 dimension=settings.PINECONE_DIMENSION,
@@ -74,11 +74,10 @@ class VectorStoreService:
     def similarity_search(
         self, 
         query: str, 
-        k: Optional[int] = None,  # FIX: Use Optional[int]
+        k: Optional[int] = None,
         filter: Optional[Dict[str, Any]] = None
     ) -> List[Document]:
         """Search for similar documents."""
-        # Set default if None
         search_k = k if k is not None else settings.TOP_K_RESULTS
         
         try:
@@ -100,11 +99,10 @@ class VectorStoreService:
     def similarity_search_with_score(
         self, 
         query: str, 
-        k: Optional[int] = None,  # FIX: Use Optional[int]
+        k: Optional[int] = None,
         filter: Optional[Dict[str, Any]] = None
     ) -> List[tuple[Document, float]]:
         """Search with relevance scores."""
-        # Set default if None
         search_k = k if k is not None else settings.TOP_K_RESULTS
         
         try:

@@ -5,9 +5,10 @@ from typing import List, Optional
 
 class ChatRequest(BaseModel):
     """Chat request from user."""
-    question: str = Field(..., min_length=1, max_length=2000, description="User's question")
-    document_ids: Optional[List[str]] = Field(None, description="Specific documents to search in")
-    stream: bool = Field(default=False, description="Enable streaming response")
+    question: str = Field(..., min_length=1, max_length=2000)
+    session_id: str = Field(default="default", description="Session ID for memory")
+    document_ids: Optional[List[str]] = Field(None)
+    stream: bool = Field(default=False)
 
 
 class SourceDocument(BaseModel):
@@ -24,10 +25,11 @@ class ChatResponse(BaseModel):
     answer: str
     sources: List[SourceDocument]
     confidence: Optional[float] = None
+    session_id: str = "default"
 
 
 class ChatStreamChunk(BaseModel):
     """Streaming chunk."""
-    type: str  # "token", "source", "done"
+    type: str
     content: str
     sources: Optional[List[SourceDocument]] = None

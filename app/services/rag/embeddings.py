@@ -2,7 +2,6 @@
 from typing import List
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from pydantic import SecretStr
-import google.generativeai as genai
 
 from app.core.config import settings
 from app.core.logging import get_logger

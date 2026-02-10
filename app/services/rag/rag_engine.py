@@ -1,10 +1,20 @@
 # app/services/rag/rag_engine.py
-from typing import List, Dict, Any, Optional, AsyncIterator
+from typing import List, Dict, Any, Optional, AsyncIterator , Sequence
+from operator import itemgetter
 import asyncio
-from langchain_google_genai import ChatGoogleGenerativeAI
 
-from langchain_core.prompts import PromptTemplate
-from langchain_core.documents  import Document
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.documents import Document
+from langchain_core.chat_history import (
+    BaseChatMessageHistory,
+    InMemoryChatMessageHistory
+)
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.messages import BaseMessage
+from langchain_core.output_parsers import StrOutputParser
+from pydantic import BaseModel, Field, SecretStr
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -14,300 +24,343 @@ from app.schemas.chat import SourceDocument
 logger = get_logger(__name__)
 
 
+# ─────────────────────────────────────────────
+# In-Memory Chat History Store
+# Stores separate history per session_id
+# ─────────────────────────────────────────────
+class InMemoryHistory(BaseChatMessageHistory, BaseModel):
+    """In-memory chat history per session."""
+    messages: List[BaseMessage] = Field(default_factory=list)
+
+    def add_messages(self, messages: Sequence[BaseMessage]) -> None:
+        self.messages.extend(messages)
+
+    def clear(self) -> None:
+        self.messages = []
+
+
+# Global session store - holds history per session_id
+session_store: Dict[str, InMemoryHistory] = {}
+
+
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+    """
+    Get or create chat history for a given session.
+    
+    Args:
+        session_id: Unique session identifier
+        
+    Returns:
+        Chat history for that session
+    """
+    if session_id not in session_store:
+        logger.info(f"Creating new session: {session_id}")
+        session_store[session_id] = InMemoryHistory()
+    return session_store[session_id]
+
+
 class RAGEngine:
     """
-    Production-grade RAG (Retrieval-Augmented Generation) Engine.
+    Production-grade RAG Engine with RunnableWithMessageHistory.
     
-    This orchestrates the entire RAG pipeline:
-    1. Retrieves relevant documents from vector store
-    2. Constructs context-aware prompts
-    3. Generates answers using LLM
-    4. Returns structured responses with sources
+    Features:
+    - Modern LangChain LCEL pipeline
+    - Per-session conversation memory
+    - Streaming support
+    - Source citations
     """
-    
+
     def __init__(self):
-        logger.info("Initializing RAG Engine")
-        
+        logger.info("Initializing RAG Engine with RunnableWithMessageHistory")
+
         # Initialize vector store
         self.vector_store = VectorStoreService()
-        
+
         # Initialize LLM
         self.llm = ChatGoogleGenerativeAI(
             model=settings.LLM_MODEL,
-            google_api_key=settings.GOOGLE_API_KEY,
-            temperature=0.3,  # Lower for more factual responses
+            google_api_key=SecretStr(settings.GOOGLE_API_KEY),
+            temperature=0.3,
             convert_system_message_to_human=True
         )
-        
-        # Custom prompt template for better responses
-        self.prompt_template = self._create_prompt_template()
-        
+
+        # Build the LCEL chain with history
+        self.chain_with_history = self._build_chain()
+
         logger.info("RAG Engine initialized successfully")
-    
-    def _create_prompt_template(self) -> PromptTemplate:
+
+    def _build_chain(self) -> RunnableWithMessageHistory:
         """
-        Create a professional prompt template for the RAG system.
+        Build the modern LCEL RAG chain with message history.
         
-        This template ensures:
-        - The LLM uses only provided context
-        - Responses are accurate and well-structured
-        - Citations are included
+        Chain Flow:
+        User Question
+            → Retrieve relevant documents
+            → Format context
+            → Inject into prompt with history
+            → LLM generates answer
+            → Parse output
         """
-        template = """You are DocuMind AI, an intelligent document assistant. Your role is to provide accurate, helpful answers based ONLY on the provided context from the user's documents.
+
+        # Prompt template with history support
+        prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                """You are DocuMind AI, an intelligent document assistant.
+Your role is to provide accurate, helpful answers based ONLY on the provided context.
+
+Key Instructions:
+1. Answer ONLY from the context below
+2. Use conversation history for follow-up context
+3. If context is insufficient, say so clearly
+4. Be concise but thorough
+5. Never hallucinate or make up information
 
 Context from documents:
-{context}
+{context}"""
+            ),
+            # This placeholder injects full conversation history
+            MessagesPlaceholder(variable_name="history"),
+            ("human", "{question}"),
+        ])
 
-User Question: {question}
-
-Instructions:
-1. Answer the question using ONLY the information from the context above
-2. If the context doesn't contain enough information to answer fully, acknowledge this
-3. Be concise but comprehensive
-4. Use bullet points or numbered lists when appropriate
-5. If you're unsure or the context is unclear, say so
-6. Never make up information not present in the context
-
-Answer:"""
-        
-        return PromptTemplate(
-            template=template,
-            input_variables=["context", "question"]
+        # Build LCEL chain
+        chain = (
+            RunnablePassthrough.assign(
+                context=itemgetter("question") | RunnablePassthrough()
+            )
+            | prompt
+            | self.llm
+            | StrOutputParser()
         )
-    
+
+        # Wrap with history management
+        chain_with_history = RunnableWithMessageHistory(
+            chain,
+            get_session_history,          # Function to get/create history
+            input_messages_key="question", # Key for user input
+            history_messages_key="history" # Key for history placeholder
+        )
+
+        return chain_with_history
+
     def _format_documents(self, documents: List[Document]) -> str:
-        """
-        Format retrieved documents into a coherent context string.
-        
-        Args:
-            documents: List of retrieved documents
-            
-        Returns:
-            Formatted context string
-        """
+        """Format retrieved documents into context string."""
+        if not documents:
+            return "No relevant documents found."
+
         formatted_docs = []
-        
         for idx, doc in enumerate(documents, 1):
-            # Extract metadata
             filename = doc.metadata.get("filename", "Unknown")
             page = doc.metadata.get("page", "Unknown")
-            
-            # Format document
-            formatted_doc = f"""
-Document {idx} (Source: {filename}, Page: {page}):
-{doc.page_content}
----"""
-            formatted_docs.append(formatted_doc)
-        
+            formatted_docs.append(
+                f"Document {idx} (Source: {filename}, Page: {page}):\n"
+                f"{doc.page_content}\n---"
+            )
+
         return "\n".join(formatted_docs)
-    
-    def _extract_source_documents(
-        self, 
+
+    def _extract_sources(
+        self,
         documents: List[tuple[Document, float]]
     ) -> List[SourceDocument]:
-        """
-        Convert retrieved documents to SourceDocument schema.
-        
-        Args:
-            documents: List of (Document, score) tuples
-            
-        Returns:
-            List of SourceDocument objects for API response
-        """
+        """Convert retrieved documents to SourceDocument schema."""
         sources = []
-        
         for doc, score in documents:
-            source = SourceDocument(
-                document_id=doc.metadata.get("document_id", "unknown"),
-                filename=doc.metadata.get("filename", "unknown"),
-                page_number=doc.metadata.get("page"),
-                chunk_text=doc.page_content[:200] + "...",  # Preview
-                relevance_score=float(score)
+            sources.append(
+                SourceDocument(
+                    document_id=doc.metadata.get("document_id", "unknown"),
+                    filename=doc.metadata.get("filename", "unknown"),
+                    page_number=doc.metadata.get("page"),
+                    chunk_text=(
+                        doc.page_content[:200] + "..."
+                        if len(doc.page_content) > 200
+                        else doc.page_content
+                    ),
+                    relevance_score=float(score),
+                )
             )
-            sources.append(source)
-        
         return sources
-    
+
     async def query(
-        self, 
-        question: str, 
-        document_ids: Optional[List[str]] = None
+        self,
+        question: str,
+        session_id: str = "default",
+        document_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
-        Main query method for RAG system.
-        
+        Query the RAG system with conversation memory.
+
         Args:
             question: User's question
-            document_ids: Optional list of specific document IDs to search
-            
+            session_id: Unique session ID for memory isolation
+            document_ids: Optional specific document IDs to search
+
         Returns:
-            Dictionary with answer and sources
+            Dictionary with answer, sources, and confidence
         """
-        logger.info(f"Processing query: {question[:100]}...")
-        
+        logger.info(f"[Session: {session_id}] Query: {question[:100]}...")
+
         try:
             # Step 1: Retrieve relevant documents
             filter_dict = None
             if document_ids:
-                # Search only in specified documents
                 filter_dict = {"document_id": {"$in": document_ids}}
-            
+
             retrieved_docs = self.vector_store.similarity_search_with_score(
                 query=question,
                 k=settings.TOP_K_RESULTS,
                 filter=filter_dict
             )
-            
+
             if not retrieved_docs:
-                logger.warning("No relevant documents found")
+                logger.warning(f"[Session: {session_id}] No documents found")
                 return {
-                    "answer": "I couldn't find any relevant information in the documents to answer your question.",
+                    "answer": (
+                        "I couldn't find relevant information in your documents. "
+                        "Please make sure you've uploaded documents related to your query."
+                    ),
                     "sources": [],
-                    "confidence": 0.0
+                    "confidence": 0.0,
                 }
-            
+
             # Step 2: Format context
-            docs_only = [doc for doc, score in retrieved_docs]
+            docs_only = [doc for doc, _ in retrieved_docs]
             context = self._format_documents(docs_only)
-            
-            # Step 3: Generate answer using LLM
-            prompt = self.prompt_template.format(
-                context=context,
-                question=question
+
+            # Step 3: Invoke chain with session history
+            # RunnableWithMessageHistory handles history automatically
+            answer = await asyncio.to_thread(
+                self.chain_with_history.invoke,
+                {
+                    "question": question,
+                    "context": context,
+                },
+                config={"configurable": {"session_id": session_id}}
             )
-            
-            logger.info("Generating answer with LLM")
-            response = await asyncio.to_thread(self.llm.invoke, prompt)
-            answer = response.content
-            
-            # Step 4: Extract sources
-            sources = self._extract_source_documents(retrieved_docs)
-            
-            # Step 5: Calculate confidence (average of retrieval scores)
-            avg_score = sum(score for _, score in retrieved_docs) / len(retrieved_docs)
-            confidence = float(avg_score)
-            
-            logger.info(f"Successfully generated answer with {len(sources)} sources")
-            
+
+            # Step 4: Extract sources and confidence
+            sources = self._extract_sources(retrieved_docs)
+            avg_score = sum(s for _, s in retrieved_docs) / len(retrieved_docs)
+
+            logger.info(
+                f"[Session: {session_id}] "
+                f"Answer generated with {len(sources)} sources"
+            )
+
             return {
                 "answer": answer,
                 "sources": sources,
-                "confidence": confidence
+                "confidence": float(avg_score),
             }
-            
+
         except Exception as e:
-            logger.error(f"Error processing query: {str(e)}")
+            logger.error(
+                f"[Session: {session_id}] Query error: {str(e)}",
+                exc_info=True
+            )
             raise
-    
+
     async def query_stream(
-        self, 
-        question: str, 
-        document_ids: Optional[List[str]] = None
+        self,
+        question: str,
+        session_id: str = "default",
+        document_ids: Optional[List[str]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Stream responses token by token for better UX.
-        
+        Stream responses with session memory.
+
         Args:
             question: User's question
-            document_ids: Optional list of specific document IDs
-            
-        Yields:
-            Dictionary chunks with type and content
+            session_id: Session ID for memory isolation
+            document_ids: Optional specific document IDs
         """
-        logger.info(f"Processing streaming query: {question[:100]}...")
-        
+        logger.info(f"[Session: {session_id}] Streaming query: {question[:100]}...")
+
         try:
-            # Step 1: Retrieve relevant documents
+            # Retrieve documents
             filter_dict = None
             if document_ids:
                 filter_dict = {"document_id": {"$in": document_ids}}
-            
+
             retrieved_docs = self.vector_store.similarity_search_with_score(
                 query=question,
                 k=settings.TOP_K_RESULTS,
                 filter=filter_dict
             )
-            
+
             if not retrieved_docs:
                 yield {
                     "type": "error",
-                    "content": "No relevant documents found"
+                    "content": "No relevant documents found. Please upload documents first."
                 }
                 return
-            
-            # Step 2: Format context
-            docs_only = [doc for doc, score in retrieved_docs]
+
+            # Format context
+            docs_only = [doc for doc, _ in retrieved_docs]
             context = self._format_documents(docs_only)
-            
-            # Step 3: Generate streaming answer
-            prompt = self.prompt_template.format(
-                context=context,
-                question=question
-            )
-            
-            # Stream tokens
-            async for chunk in self.llm.astream(prompt):
+
+            # Stream tokens with history
+            full_answer = ""
+            async for chunk in self.chain_with_history.astream(
+                {
+                    "question": question,
+                    "context": context,
+                },
+                config={"configurable": {"session_id": session_id}}
+            ):
+                full_answer += chunk
                 yield {
                     "type": "token",
-                    "content": chunk.content
+                    "content": chunk
                 }
-            
-            # Step 4: Send sources at the end
-            sources = self._extract_source_documents(retrieved_docs)
+
+            # Send sources after streaming
+            sources = self._extract_sources(retrieved_docs)
             yield {
                 "type": "sources",
                 "content": "",
-                "sources": [source.model_dump() for source in sources]
+                "sources": [s.model_dump() for s in sources]
             }
-            
-            # Step 5: Done signal
-            yield {
-                "type": "done",
-                "content": ""
-            }
-            
+
+            yield {"type": "done", "content": ""}
+            logger.info(f"[Session: {session_id}] Streaming completed")
+
         except Exception as e:
-            logger.error(f"Error in streaming query: {str(e)}")
-            yield {
-                "type": "error",
-                "content": str(e)
-            }
-    
+            logger.error(
+                f"[Session: {session_id}] Streaming error: {str(e)}",
+                exc_info=True
+            )
+            yield {"type": "error", "content": str(e)}
+
+    def clear_session(self, session_id: str) -> None:
+        """Clear memory for a specific session."""
+        if session_id in session_store:
+            session_store[session_id].clear()
+            logger.info(f"Cleared session: {session_id}")
+
+    def clear_all_sessions(self) -> None:
+        """Clear all sessions."""
+        session_store.clear()
+        logger.info("All sessions cleared")
+
     def add_document(self, processed_doc: Dict[str, Any]) -> int:
-        """
-        Add processed document to vector store.
-        
-        Args:
-            processed_doc: Dictionary from DocumentProcessor
-            
-        Returns:
-            Number of chunks added
-        """
+        """Add processed document to vector store."""
         try:
             chunks = processed_doc["chunks"]
+            logger.info(f"Adding {len(chunks)} chunks to vector store")
             self.vector_store.add_documents(chunks)
-            
-            logger.info(
-                f"Added {len(chunks)} chunks for document "
-                f"{processed_doc['document_id']}"
-            )
-            
+            logger.info(f"Successfully added document {processed_doc['document_id']}")
             return len(chunks)
-            
         except Exception as e:
-            logger.error(f"Error adding document to vector store: {str(e)}")
+            logger.error(f"Error adding document: {str(e)}", exc_info=True)
             raise
-    
-    def delete_document(self, document_id: str):
-        """
-        Delete document from vector store.
-        
-        Args:
-            document_id: Document ID to delete
-        """
+
+    def delete_document(self, document_id: str) -> None:
+        """Delete document from vector store."""
         try:
             self.vector_store.delete_by_document_id(document_id)
             logger.info(f"Deleted document: {document_id}")
         except Exception as e:
-            logger.error(f"Error deleting document: {str(e)}")
+            logger.error(f"Error deleting document: {str(e)}", exc_info=True)
             raise
