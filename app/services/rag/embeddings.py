@@ -18,11 +18,7 @@ class EmbeddingService:
     def __init__(self):
         logger.info(f"Initializing Google Embeddings with model: {settings.EMBEDDING_MODEL}")
         
-        # Configure Google API
-        # genai.configure(api_key=settings.GOOGLE_API_KEY)
-        
-        # Initialize embeddings with the latest model
-        # FIX: Convert string to SecretStr
+       
         self.embeddings = GoogleGenerativeAIEmbeddings(
             model=settings.EMBEDDING_MODEL,
             api_key=SecretStr(settings.GOOGLE_API_KEY),  # Convert to SecretStr

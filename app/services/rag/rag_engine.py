@@ -1,18 +1,14 @@
 # app/services/rag/rag_engine.py
-from typing import List, Dict, Any, Optional, AsyncIterator , Sequence
+from typing import List, Dict, Any, Optional, AsyncIterator, Sequence
 from operator import itemgetter
 import asyncio
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.documents import Document
-from langchain_core.chat_history import (
-    BaseChatMessageHistory,
-    InMemoryChatMessageHistory
-)
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from pydantic import BaseModel, Field, SecretStr
 
@@ -26,7 +22,6 @@ logger = get_logger(__name__)
 
 # ─────────────────────────────────────────────
 # In-Memory Chat History Store
-# Stores separate history per session_id
 # ─────────────────────────────────────────────
 class InMemoryHistory(BaseChatMessageHistory, BaseModel):
     """In-memory chat history per session."""
@@ -39,20 +34,11 @@ class InMemoryHistory(BaseChatMessageHistory, BaseModel):
         self.messages = []
 
 
-# Global session store - holds history per session_id
 session_store: Dict[str, InMemoryHistory] = {}
 
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    """
-    Get or create chat history for a given session.
-    
-    Args:
-        session_id: Unique session identifier
-        
-    Returns:
-        Chat history for that session
-    """
+    """Get or create chat history for a session."""
     if session_id not in session_store:
         logger.info(f"Creating new session: {session_id}")
         session_store[session_id] = InMemoryHistory()
@@ -60,89 +46,22 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
 
 
 class RAGEngine:
-    """
-    Production-grade RAG Engine with RunnableWithMessageHistory.
-    
-    Features:
-    - Modern LangChain LCEL pipeline
-    - Per-session conversation memory
-    - Streaming support
-    - Source citations
-    """
+    """Production RAG Engine with proper context retrieval."""
 
     def __init__(self):
-        logger.info("Initializing RAG Engine with RunnableWithMessageHistory")
-
-        # Initialize vector store
+        logger.info("Initializing RAG Engine")
+        
         self.vector_store = VectorStoreService()
-
-        # Initialize LLM
+        
         self.llm = ChatGoogleGenerativeAI(
             model=settings.LLM_MODEL,
             google_api_key=SecretStr(settings.GOOGLE_API_KEY),
             temperature=0.3,
             convert_system_message_to_human=True
         )
-
-        # Build the LCEL chain with history
-        self.chain_with_history = self._build_chain()
-
-        logger.info("RAG Engine initialized successfully")
-
-    def _build_chain(self) -> RunnableWithMessageHistory:
-        """
-        Build the modern LCEL RAG chain with message history.
         
-        Chain Flow:
-        User Question
-            → Retrieve relevant documents
-            → Format context
-            → Inject into prompt with history
-            → LLM generates answer
-            → Parse output
-        """
-
-        # Prompt template with history support
-        prompt = ChatPromptTemplate.from_messages([
-            (
-                "system",
-                """You are DocuMind AI, an intelligent document assistant.
-Your role is to provide accurate, helpful answers based ONLY on the provided context.
-
-Key Instructions:
-1. Answer ONLY from the context below
-2. Use conversation history for follow-up context
-3. If context is insufficient, say so clearly
-4. Be concise but thorough
-5. Never hallucinate or make up information
-
-Context from documents:
-{context}"""
-            ),
-            # This placeholder injects full conversation history
-            MessagesPlaceholder(variable_name="history"),
-            ("human", "{question}"),
-        ])
-
-        # Build LCEL chain
-        chain = (
-            RunnablePassthrough.assign(
-                context=itemgetter("question") | RunnablePassthrough()
-            )
-            | prompt
-            | self.llm
-            | StrOutputParser()
-        )
-
-        # Wrap with history management
-        chain_with_history = RunnableWithMessageHistory(
-            chain,
-            get_session_history,          # Function to get/create history
-            input_messages_key="question", # Key for user input
-            history_messages_key="history" # Key for history placeholder
-        )
-
-        return chain_with_history
+        self.chain_with_history = self._build_chain()
+        logger.info("RAG Engine initialized successfully")
 
     def _format_documents(self, documents: List[Document]) -> str:
         """Format retrieved documents into context string."""
@@ -154,14 +73,48 @@ Context from documents:
             filename = doc.metadata.get("filename", "Unknown")
             page = doc.metadata.get("page", "Unknown")
             formatted_docs.append(
-                f"Document {idx} (Source: {filename}, Page: {page}):\n"
-                f"{doc.page_content}\n---"
+                f"[Document {idx}] {filename} (Page {page}):\n{doc.page_content}\n"
             )
+        
+        return "\n---\n".join(formatted_docs)
 
-        return "\n".join(formatted_docs)
+    def _build_chain(self) -> RunnableWithMessageHistory:
+        """Build LCEL chain with message history."""
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are DocuMind AI, an intelligent document assistant.
+
+Answer questions based ONLY on the context provided below.
+
+Context:
+{context}
+
+Instructions:
+- Use ONLY the context above to answer
+- Reference conversation history for follow-ups
+- If context is insufficient, say "I don't have enough information in the uploaded documents to answer that."
+- Be concise and accurate
+- Never make up information"""),
+            MessagesPlaceholder(variable_name="history"),
+            ("human", "{question}"),
+        ])
+        
+        # Simple chain (retrieval happens in query() method)
+        chain = (
+            prompt
+            | self.llm
+            | StrOutputParser()
+        )
+        
+        return RunnableWithMessageHistory(
+            chain,
+            get_session_history,
+            input_messages_key="question",
+            history_messages_key="history"
+        )
 
     def _extract_sources(
-        self,
+        self, 
         documents: List[tuple[Document, float]]
     ) -> List[SourceDocument]:
         """Convert retrieved documents to SourceDocument schema."""
@@ -188,21 +141,11 @@ Context from documents:
         session_id: str = "default",
         document_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """
-        Query the RAG system with conversation memory.
-
-        Args:
-            question: User's question
-            session_id: Unique session ID for memory isolation
-            document_ids: Optional specific document IDs to search
-
-        Returns:
-            Dictionary with answer, sources, and confidence
-        """
+        """Query RAG system with proper context retrieval."""
         logger.info(f"[Session: {session_id}] Query: {question[:100]}...")
 
         try:
-            # Step 1: Retrieve relevant documents
+            # ✅ FIX: Actually retrieve documents
             filter_dict = None
             if document_ids:
                 filter_dict = {"document_id": {"$in": document_ids}}
@@ -218,35 +161,31 @@ Context from documents:
                 return {
                     "answer": (
                         "I couldn't find relevant information in your documents. "
-                        "Please make sure you've uploaded documents related to your query."
+                        "Please upload documents related to your question."
                     ),
                     "sources": [],
                     "confidence": 0.0,
                 }
 
-            # Step 2: Format context
+            # ✅ FIX: Format context properly
             docs_only = [doc for doc, _ in retrieved_docs]
             context = self._format_documents(docs_only)
 
-            # Step 3: Invoke chain with session history
-            # RunnableWithMessageHistory handles history automatically
-            answer = await asyncio.to_thread(
-                self.chain_with_history.invoke,
+            logger.info(f"[Session: {session_id}] Retrieved {len(docs_only)} documents")
+
+            # ✅ FIX: Use ainvoke instead of asyncio.to_thread
+            answer = await self.chain_with_history.ainvoke(
                 {
                     "question": question,
-                    "context": context,
+                    "context": context,  # ✅ Actually passing context
                 },
                 config={"configurable": {"session_id": session_id}}
             )
 
-            # Step 4: Extract sources and confidence
             sources = self._extract_sources(retrieved_docs)
             avg_score = sum(s for _, s in retrieved_docs) / len(retrieved_docs)
 
-            logger.info(
-                f"[Session: {session_id}] "
-                f"Answer generated with {len(sources)} sources"
-            )
+            logger.info(f"[Session: {session_id}] Answer generated")
 
             return {
                 "answer": answer,
@@ -255,10 +194,7 @@ Context from documents:
             }
 
         except Exception as e:
-            logger.error(
-                f"[Session: {session_id}] Query error: {str(e)}",
-                exc_info=True
-            )
+            logger.error(f"[Session: {session_id}] Query error: {str(e)}", exc_info=True)
             raise
 
     async def query_stream(
@@ -267,14 +203,7 @@ Context from documents:
         session_id: str = "default",
         document_ids: Optional[List[str]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """
-        Stream responses with session memory.
-
-        Args:
-            question: User's question
-            session_id: Session ID for memory isolation
-            document_ids: Optional specific document IDs
-        """
+        """Stream responses with proper context."""
         logger.info(f"[Session: {session_id}] Streaming query: {question[:100]}...")
 
         try:
@@ -300,22 +229,25 @@ Context from documents:
             docs_only = [doc for doc, _ in retrieved_docs]
             context = self._format_documents(docs_only)
 
-            # Stream tokens with history
+            # ✅ FIX: Handle streaming properly
             full_answer = ""
             async for chunk in self.chain_with_history.astream(
                 {
                     "question": question,
-                    "context": context,
+                    "context": context,  # ✅ Actually passing context
                 },
                 config={"configurable": {"session_id": session_id}}
             ):
-                full_answer += chunk
-                yield {
-                    "type": "token",
-                    "content": chunk
-                }
+                # ✅ FIX: Handle different chunk types
+                if isinstance(chunk, str):
+                    full_answer += chunk
+                    yield {"type": "token", "content": chunk}
+                elif isinstance(chunk, AIMessage):
+                    content = chunk.content
+                    full_answer += "".join(str(item) for item in content)
+                    yield {"type": "token", "content": content}
 
-            # Send sources after streaming
+            # Send sources
             sources = self._extract_sources(retrieved_docs)
             yield {
                 "type": "sources",
@@ -323,14 +255,12 @@ Context from documents:
                 "sources": [s.model_dump() for s in sources]
             }
 
+            # ✅ Send completion signal
             yield {"type": "done", "content": ""}
             logger.info(f"[Session: {session_id}] Streaming completed")
 
         except Exception as e:
-            logger.error(
-                f"[Session: {session_id}] Streaming error: {str(e)}",
-                exc_info=True
-            )
+            logger.error(f"[Session: {session_id}] Streaming error: {str(e)}", exc_info=True)
             yield {"type": "error", "content": str(e)}
 
     def clear_session(self, session_id: str) -> None:
@@ -338,11 +268,6 @@ Context from documents:
         if session_id in session_store:
             session_store[session_id].clear()
             logger.info(f"Cleared session: {session_id}")
-
-    def clear_all_sessions(self) -> None:
-        """Clear all sessions."""
-        session_store.clear()
-        logger.info("All sessions cleared")
 
     def add_document(self, processed_doc: Dict[str, Any]) -> int:
         """Add processed document to vector store."""

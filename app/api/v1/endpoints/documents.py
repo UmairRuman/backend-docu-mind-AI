@@ -55,7 +55,8 @@ async def upload_document(file: UploadFile = File(...)):
         chunks_added = rag_engine.add_document(processed_doc)
         
         # Step 5: Clean up (optional - you might want to keep files)
-        # delete_file(file_path)
+        delete_file(file_path)
+        logger.info(f"Cleaned up temporary file: {file_path}")
         
         logger.info(f"Successfully processed document: {file.filename}")
         

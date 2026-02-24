@@ -46,10 +46,7 @@ async def chat_query(request: ChatRequest):
 @router.post("/query/stream")
 async def chat_query_stream(request: ChatRequest):
     """Stream chat responses with memory."""
-    logger.info(
-        f"[Session: {request.session_id}] "
-        f"Streaming: {request.question[:100]}..."
-    )
+    logger.info(f"[Session: {request.session_id}] Streaming: {request.question[:100]}...")
 
     async def generate():
         try:
@@ -59,6 +56,9 @@ async def chat_query_stream(request: ChatRequest):
                 document_ids=request.document_ids
             ):
                 yield f"data: {json.dumps(chunk)}\n\n"
+             
+            # ✅ ADD THIS: Send done signal
+            yield "data: [DONE]\n\n"
 
         except Exception as e:
             logger.error(f"Streaming error: {str(e)}")
@@ -77,8 +77,8 @@ async def clear_session(session_id: str):
     return {"message": f"Session {session_id} cleared", "success": True}
 
 
-@router.delete("/sessions/all")
-async def clear_all_sessions():
-    """Clear all conversation sessions."""
-    rag_engine.clear_all_sessions()
-    return {"message": "All sessions cleared", "success": True}
+# @router.delete("/sessions/all")
+# async def clear_all_sessions():
+#     """Clear all conversation sessions."""
+#     rag_engine.clear_all_sessions()
+#     return {"message": "All sessions cleared", "success": True}

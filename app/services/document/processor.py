@@ -86,11 +86,12 @@ class DocumentProcessor:
         - Timestamp
         """
         total_chunks = len(chunks)
-        
+        logger.info(f"Total Number of chunks from document {filename}: {total_chunks}")
         enhanced_chunks = []
         for idx, chunk in enumerate(chunks):
             # Preserve existing metadata
             metadata = chunk.metadata.copy() if chunk.metadata else {}
+            page_number = metadata.get("page")
             
             # Add professional metadata
             metadata.update({
@@ -99,7 +100,8 @@ class DocumentProcessor:
                 "chunk_index": idx,
                 "total_chunks": total_chunks,
                 "timestamp": datetime.now().isoformat(),
-                "chunk_size": len(chunk.page_content)
+                "chunk_size": len(chunk.page_content),
+                "page": page_number
             })
             
             # Create new document with enhanced metadata
@@ -136,6 +138,17 @@ class DocumentProcessor:
             
             # Step 2: Load document
             documents = self.load_document(file_path, filename)
+
+             # ✅ DEBUG: Log loaded content
+            total_chars = sum(len(doc.page_content) for doc in documents)
+            logger.info(f"📄 Loaded {len(documents)} pages with {total_chars} total characters")
+
+            # ✅ DEBUG: Log first page content
+            if documents:
+              first_page_preview = documents[0].page_content[:200]
+              logger.info(f"📝 First page preview: {first_page_preview}")
+            else:
+              logger.warning("⚠️ No pages loaded from document!")
             
             # Step 3: Split into chunks
             chunks = self.text_splitter.split_documents(documents)
